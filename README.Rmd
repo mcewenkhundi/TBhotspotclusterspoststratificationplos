@@ -36,25 +36,38 @@ Authors: McEwen Khundi^1,2^, James R Carpenter^1^, Elizabeth L Corbett^1,2^, Hel
 
 Description of the analysis scripts and source script of each output in the analysis
 
-1.  1_Part2_all_models_notif_rintc.R
+1.  1_PoststratificationTBprevalence.Rmd
 
-    -   Script for producing notification model based on the final model selected in the primary analysis applied to all notified TB cases.
+    -   Script for producing poststratified TB prevalence based on a world pop population of urban Blantyre.
 
-2.  2_Part4_derive_posteriors_rintc_2021-09-29.Rmd
+2.  2_postratifiedPrevModel.R
+
+    -   Script for producing a model of prevalance based on the postratified TB prevalance cases
+    
+
+3.  3_derive_posteriors_rintc_2021-09-29.Rmd
 
     -   Script for deriving posterior samples from the selected final models and also calculating the prevalence to notification ratios
-    -   the prevalence model was copied from the primary analysis repository.
+    -   the notification model was copied from the primary analysis repository.
 
-3.  3_Part4_exploratory_analysis_posterior_rintc_2021-09-29.Rmd
 
-    -   Exploratory analysis of the posterior samples generated in part 2 including graphs
+4. 4_exploratory_analysis_posterior_rintc_2021-09-29.Rmd
 
-    -   Source of S4_Fig.tiff and S5_Fig.tiff
+    -   Exploratory analysis of the posterior samples generated in part 3 including graphs
+    -   Source of S1_Fig.tiff and S3_Fig.tiff
+    
+5. 5_Model_table_results.R
 
-4. 4_Model_table_results.R
+    -   Source of S7_prev_models_rintc.rtf
 
-    -   Source of table S8_Table_allnotified_models_rintc.rtf
+6. 6_Comparisongraph.R
 
+    -   Source of S2_Fig.tiff
+    
+7. 7_Comparisongraph.R
+
+    -   Source of S9_Table_tablecompare_prev31_notif25_all.rtf
+    
 
 <br>
 
@@ -62,9 +75,4 @@ Description of the analysis scripts and source script of each output in the anal
 
 ### **`dat_scale.rds`**
 
-Neighbourhood level variables
-
-### **`dat_scale_ln.rds`**
-
-Neighbourhood level variables in longitudinal format
 
