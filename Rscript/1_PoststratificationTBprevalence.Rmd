@@ -1,0 +1,410 @@
+---
+title: "TBhotspotsPostratification"
+
+subtitle: "Post stratification of TB prevalence"
+
+author: |
+  | McEwen Khundi
+  |
+  | London School of Hygiene & Tropical Medicine, London, UK
+  | Malawi-Liverpool-Wellcome Clinical Research Programme, Blantyre, Malawi
+  |
+
+date: | 
+  | `r format(Sys.time(), "%B %d, %Y")`
+  |
+  | Table of Contents:
+output: 
+  html_document:
+    df_print: paged
+    theme: spacelab
+    toc: true
+---
+
+<br>
+
+## 1. Backgound
+
+
+<br>
+
+## 2. Set-up
+
+Load all required packages for analysis.
+
+```{r setup, message=FALSE}
+library(tidyverse)    #for data manipulation
+library(pmthemes)     #for ggplot themes
+library(knitr)        #for tables
+library(brms)
+library(here)
+library(gt)
+library(janitor)
+library(brms)
+library(tidybayes)
+```
+
+<br>
+
+## 3. Import datasets
+
+Import data required for the analysis.
+
+```{r import}
+ind_xray_hts_subdata_tbcse <- readRDS(here::here("data/ind_xray_hts_subdata_tbcse.rds"))
+
+wp_2019 <- readRDS(here::here("data/wp_2019.rds")) %>% ungroup() %>% mutate(p_pop=N_wp/sum(N_wp)) %>% mutate(cluster=as.factor(paste0("c",clust)))
+
+
+```
+
+<br>
+
+## 4. Tidying
+
+```{r}
+#Checking data with missing values
+ind_xray_hts_subdata_tbcse %>%
+  filter(rowSums(across(everything(), ~is.na(.x))) > 0 )
+
+age_levels2 <- c("16-19","20-24","25-29","30-34","35-39","40-44","45-49","50-54","55-59","60-64","65-69","70+") # includes up to 70
+age_levels_hack <- c(18,22,27,32,37,42,47,52,57,62,67,72)
+```
+
+<br>
+
+## 5. Model
+
+```{r tidy}
+m1 <- readRDS(here("data/m1.rds"))
+m1
+plot(m1)
+# Prior names
+# get_prior(formula =tbcase ~ sex + age + (1|cluster), 
+#           data = ind_xray_hts_subdata_tbcse , family = bernoulli())
+# 
+# # Priors
+# p1 <- c(
+#   prior(normal(0,10), class=Intercept), # so this is my estimate for intercept at base case??? 
+#   prior(normal(1,10), class="b"), #log-odds for women compared to men (see graph at top, log-odds 1 roughly equvilent to doubling)
+#   prior(cauchy(0,1), sd) # can't remember/not sure what this is
+# )
+# 
+# m1 <- brm(tbcase ~ sex + age + (1|cluster), 
+#           data=ind_xray_hts_subdata_tbcse, 
+#           family=bernoulli(), 
+#           prior=p1,
+#           chains=4,
+#           cores=4)
+# 
+# saveRDS(m1,here::here("data/m1.rds"))
+```
+## 6. Scaffold df
+Create df for predictions
+
+Create a scaffold df - one row per every combo of age, sex, cluster (one age at midpoint of every age group for now)
+
+```{r}
+# Create a scaffold df - one row per every combo of age, sex, cluster (one age at midpoint of every age group for now)
+newdata_blank <- list(cluster=paste0("c",c(1:72)), age=c(18,22,27,32,37,42,47,52,57,62,67,72), sex=c("Male", "Female")) %>% expand.grid() %>% as_tibble()
+
+
+a <- readRDS(here("data/a.rds"))
+a <- tidybayes::add_fitted_draws(newdata=newdata_blank, model=m1) 
+
+#saveRDS(a, file = here::here("data/a.rds"))
+```
+So this makes sense for a summary of probability of being TB positive at any age / sex / cluster category
+
+```{r}
+a %>% group_by(age,sex,cluster) %>% median_qi(.value)
+```
+And we can use this to draw the graph we like (although NB. this graph is less good as age is one of 9 levels, not over every level)
+```{r}
+a %>% group_by(age,sex,cluster) %>% median_qi(.value) %>%
+  ggplot() +
+  geom_path(aes(x=age, y=.value*100000, group=cluster, colour=sex), alpha=0.2) +
+  facet_grid(sex~.) +
+  scale_color_brewer(palette = "Set1") +
+  #scale_colour_manual(values = c("cyan4", "darkorange")) +
+  labs(y="TB prevalence per 100000",
+       x="Age (years)") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+BUT there are two problems with "overall" TB prevalence here. (a) the CI is too wide, (b) I am pretty sure this is overall HIV prevalence (?probability) for a population where there is one person at every age-sex-cluster level.
+
+See below.  TB prevalence 179.22 per 100,000 (too high, it's 13% in reality) and CI goes from 33.64 per 100,000 to 672.91 per 100,000.  
+
+To me this CI makes sense if you had to guess probability of any one person picked at random in Blantyre being TB positive, but it doesn't make sense as a population prevalence (because not everyone in population is going to have extreme values).
+
+```{r}
+a %>% ungroup() %>% median_qi(.value)
+
+0.001792206*100000;	0.0003364706*100000;	0.006729115*100000
+```
+So, not claiming this is sensible, but it is possible to take the fitted_draws df and gather a summary of each "hypothetical" one-person-per-age-sex-category population. Then can median_qi the summary...
+
+
+```{r}
+a %>% ungroup() %>% mutate(set=rep(1:4000, times=nrow(newdata_blank))) %>% # the defaults in add_fitted_draws seem to have 4000 draws per age-sex-clust category
+  group_by(set) %>% 
+  summarise(prev=median(.value)) %>% # can take median here as there is one "person" (row) per age-sex-cluster category, so nothing to weight
+  median_qi(prev)
+
+0.001782939*100000;	0.001016186*100000;	0.002691657*100000
+```
+^^ Still 178.29 (which I think is wrong), but CI is much smaller ( 101.6186 to 269.1657)
+
+## 7. A scaffold from the data itself
+
+```{r, message=F}
+newdata_scale <- ind_xray_hts_subdata_tbcse %>% 
+  mutate(age = cut(age, breaks=c(15,20,25,30,35,40,45,50,55,60,65,70,Inf), right=F,  labels=age_levels_hack)) %>%
+  mutate(age=as.numeric(as.character(age))) %>%
+  group_by(age,sex,cluster) %>% summarise(n=n()) %>% 
+  right_join(newdata_blank) %>%
+  mutate(n=case_when(is.na(n)~0L, T ~n)) # to make NAs into zeros
+newdata_scale # so this is a dataframe with the number of people in each age-sex-cluster group ("n")
+
+rm(a)
+
+b <- readRDS(here("data/b.rds"))
+# b <- tidybayes::add_fitted_draws(newdata=newdata_scale, model=m1) 
+# saveRDS(b, file = here::here("data/b.rds"))
+b %>% ungroup() %>% median_qi(.value) # same as above so far - just one person for each row (have ignored "n")
+
+0.001792206*100000;	0.0003364706*100000;	0.006729115*100000
+```
+Now combine with how many people are in each age-sex-cluster category (there are 4000 draws per level, so 4000 different hypothetical populations)
+
+```{r}
+
+b %>% ungroup() %>% 
+  mutate(set=rep(1:4000, times=nrow(newdata_blank))) %>%
+  group_by(set) %>%
+  mutate(p_pop=n/sum(n)) %>% ###Every sum(n) is the same try to find out from Rachael
+  mutate(pp =.value * p_pop) %>%
+  summarise(prev=sum(pp)) # Sothis is the overall prevalence, in 4000 different iterations of draws
+
+b %>% ungroup() %>% 
+  mutate(set=rep(1:4000, times=nrow(newdata_blank))) %>%
+  group_by(set) %>%
+  mutate(p_pop=n/sum(n)) %>%
+  mutate(pp =.value * p_pop) %>%
+  summarise(prev=sum(pp)) %>% # Sothis is the overall prevalence, in 4000 different iterations of draws
+  median_qi(prev)
+
+0.002192346*100000;	0.001494808*100000;	0.003076053*100000;
+```
+So this estimate ^ (219) is very similar to data, with a v small CI (149 -  307). 
+
+Could also do something similar to calculate cluster-specific prevalence; given the age and sex distribution in each cluster (in the tested dataset)
+
+```{r, message=F, warning=F}
+c <- b %>% ungroup() %>% 
+  mutate(set=rep(1:4000, times=nrow(newdata_blank))) %>%
+  group_by(set, cluster) %>%
+  mutate(p_pop=n/sum(n)) %>%
+  mutate(pp =.value * p_pop) %>%
+  summarise(prev=sum(pp)) %>%
+  group_by(cluster) %>%
+  median_qi(prev)
+c
+```
+And plot this - is there shrinkage?
+
+So there is shrinkage, yes!
+
+```{r}
+# scale_clust <- scale %>% group_by(cluster) %>% summarise(n_pos=sum(hiv=="pos"), n=n()) %>% mutate(p_pos=n_pos/n) %>% filter(is.na(clust)==F)
+# scale_clust$clust <- reorder(scale_clust$clust, scale_clust$p_pos)
+
+ggplot() +
+  #geom_point(aes(x=clust,y=p_pos,color="observed"), data=scale_clust) +
+  geom_pointrange(aes(x=cluster, y=prev*100000, ymin=.lower*100000, ymax=.upper*100000, color="modelled"), data=c, size=0.2) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=-90))
+```
+
+## 8. Scaffold from the census
+
+Same as the steps above, except this time, match to the census (wp) not the observed data.
+
+HIV prevalence goes down, still a v small CI.
+
+```{r}
+newdata_wp <- wp_2019 %>% mutate(age=as.character(ageg))%>%
+                mutate(age=factor(age,labels=age_levels_hack)) %>% 
+                mutate(age=as.numeric(as.character(age))) %>% 
+                mutate(cluster=as.character(cluster),sex = str_to_title(sex)) %>% 
+                ungroup() %>% select(age,cluster,sex,N_wp) %>%
+                rename(n=N_wp)
+
+rm(b)
+d <- tidybayes::add_fitted_draws(newdata=newdata_wp, model=m1) 
+saveRDS(d, file = here::here("data/d.rds"))
+
+d %>% ungroup() %>% 
+  mutate(set=rep(1:4000, times=nrow(newdata_wp))) %>%
+  group_by(set) %>%
+  mutate(p_pop=n/sum(n)) %>%
+  mutate(pp =.value * p_pop) %>%
+  summarise(prev=sum(pp)) # So this is the overall prevalence, in 4000 different iterations of draws
+
+d %>% ungroup() %>% 
+  mutate(set=rep(1:4000, times=nrow(newdata_wp))) %>%
+  group_by(set) %>%
+  mutate(p_pop=n/sum(n)) %>%
+  mutate(pp =.value * p_pop) %>%
+  summarise(prev=sum(pp)) %>% # So this is the overall prevalence, in 4000 different iterations of draws
+  median_qi(prev) # and median_qi it?
+
+0.002536124*100000;	0.001708527*100000;	0.003619384*100000
+```
+And what about per cluster with census data...?
+
+It goes up as expected
+
+```{r}
+e <- d %>% ungroup() %>% 
+  mutate(set=rep(1:4000, times=nrow(newdata_blank))) %>%
+  group_by(set, cluster) %>%
+  mutate(p_pop=n/sum(n)) %>%
+  mutate(pp =.value * p_pop) %>%
+  summarise(prev=sum(pp)) %>%
+  group_by(cluster) %>%
+  median_qi(prev)
+
+ggplot() +
+  #geom_point(aes(x=clust,y=p_pos,color="observed"), data=scale_clust) +
+  geom_pointrange(aes(x=cluster, y=prev*100000, ymin=.lower*100000, ymax=.upper*100000, color="modelled"), data=c, size=0.2) +
+  geom_pointrange(aes(x=cluster, y=prev*100000, ymin=.lower*100000, ymax=.upper*100000, color="post-strat"), data=e, size=0.2) +
+  #geom_hline(aes(color="observed", yintercept=median(scale_clust$p_pos)*100)) +
+    #geom_hline(aes(color="modelled", yintercept=median(c$prev)*100)) +
+    #geom_hline(aes(color="post-strat", yintercept=median(e$prev)*100)) +
+ # scale_color_manual(values=c("#DD8D29","#46ACC8","#B40F20")) +
+ # labs(y="HIV prevalence (%)",
+  #     x="Cluster") +
+  theme_bw() +
+  theme(axis.text.x = element_blank())
+```
+# 9. Poststratify "by hand" to check
+
+No modelling.  And ignoring cluster for now - just age and sex.
+
+```{r}
+f <- ind_xray_hts_subdata_tbcse %>% 
+  mutate(age = cut(age, breaks=c(15,20,25,30,35,40,45,50,55,60,65,70,Inf), right=F,  labels=age_levels_hack)) %>%
+  mutate(age=as.numeric(as.character(age))) %>%
+  group_by(age,sex) %>% summarise(n_pos=sum(tbcase==1), n=n()) %>% 
+  ungroup() %>%
+  mutate(p_pos=n_pos/n,
+         p_pop_tested=n/sum(n))
+
+rm(d)
+g <- newdata_wp %>% group_by(age,sex) %>% summarise(N_wp=sum(n)) %>% ungroup() %>% mutate(p_pop=N_wp/sum(N_wp)) %>% left_join(f)
+saveRDS(g, file = here::here("data/g.rds"))
+
+ggplot(g) +
+  geom_path(aes(x=age, y=p_pop_tested, group=sex, color="Tested")) +
+  geom_path(aes(x=age, y=p_pop, group=sex, color="WP population")) +
+  facet_grid(.~sex) +
+  theme_bw()
+```
+
+So men were undesampled -- and we've undersampled people with a relatively high risk of TB.  And blue is oversampled, and we've oversampled people with a relatively low risk of TB.
+
+```{r}
+g %>% select(age,sex,p_pos,p_pop,p_pop_tested) %>% 
+  mutate(diff=p_pop_tested - p_pop) %>%
+  gt() %>%
+  fmt_number(columns = c(p_pos, p_pop_tested, p_pop, diff),rows = everything(),decimals = 3) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "#8cd3ff")
+      ),
+    locations = cells_body(
+      columns = c(diff,age,sex,p_pos),
+      rows = diff > 0.025
+    )) %>%
+    tab_style(
+    style = list(
+      cell_fill(color = "#ffe5b4")
+      ),
+    locations = cells_body(
+      columns = c(diff,age,sex,p_pos),
+      rows = diff < -0.025
+    )) 
+```
+
+```{r}
+g %>% mutate(p1=p_pos * p_pop_tested) %>%
+  mutate(p2=p_pos * p_pop) %>%
+  summarise(sample=sum(p1),
+            post_strat=sum(p2)) # goes down when post-stratify "by hand".
+
+0.002149422*13492;0.002844623*13492
+
+0.002149422*100000;0.002844623*100000
+
+ind_xray_hts_subdata_tbcse %>% tabyl(tbcase)
+
+```
+## 10 Use the poststratified prevalances on the prev_tent data to calculate new prevalant TB cases
+Import the scale dataset, use the column tent_cxr_total and the values in the tible named e
+```{r}
+dat_scale <- readRDS(here::here("data/dat_scale.rds"))
+###make sure you check the calculation manually to verify what is going on
+newdata_wp_cluster  <- newdata_wp %>% group_by(cluster) %>% summarise(n_cluster = sum(n))
+
+dat_scale$n_cluster <- NULL
+dat_scale$prev <- NULL
+
+dat_scale <- dat_scale %>%
+             left_join(newdata_wp_cluster, by = "cluster") %>%
+             left_join(e, by = "cluster") %>%
+             mutate(poststratPrevTB = n_cluster*prev, .after = n_prev_tbcases) %>%
+             mutate(poststratPrevTB_round = round(poststratPrevTB), .after = poststratPrevTB)
+
+
+dat_scale <- dat_scale %>%
+                   mutate(poststratPrevTB_tent = tent_cxr_total*prev, .after = n_prev_tbcases) %>%
+                   mutate(poststratPrevTB_round_tent = round(poststratPrevTB_tent), .after = poststratPrevTB)
+
+dat_scale %>%
+  select(cluster,contains("poststratPrevTB"),prev, worldpop=n_cluster) %>%
+  gt::gt() %>%
+  gt::fmt_missing(
+    everything(),
+    missing_text = ""
+  ) %>%
+  gt::gtsave(filename = "dat_scale_tent_poststratTB.rtf", path = here::here("figures"))
+
+  
+#View(dplyr::select(dat_scale, poststratPrevTB,poststratPrevTB_round,n_prev_tbcases, n_cluster, prev))
+
+saveRDS(object = dat_scale, file = here::here("data/dat_scale.rds"))
+```
+
+
+<br>
+
+## X. Reproducibility
+
+This reproduction of the analysis was run by: 
+
+```{r sysinfo, echo=FALSE, message=FALSE, comment=NA, warning=FALSE}
+
+sysinfo <- Sys.info()
+
+sysinfo <- data.frame(keyName=names(sysinfo), value=sysinfo, row.names=NULL)
+
+sysinfo %>% kable()
+```
+
+Analysis was run at **`r Sys.time()`**, and using the following Session Info:
+
+```{r sessioninfo, echo=FALSE, results='markdown', message=FALSE, comment=NA, warning=FALSE}
+sessionInfo()
+```

@@ -1,0 +1,292 @@
+---
+title: "D_MrP"
+author: "R Burke"
+date: "26/07/2021"
+output: html_document
+---
+
+This is an R script to try to re-create MrP to estimate HIV prevalence in SCALE
+
+A reminder of model (eval = False); will load output in next section
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidybayes)
+library(here)
+library(splines)
+library(gt)
+library(janitor)
+library(brms)
+
+scale <- readRDS(here("scale_hiv.rds")) %>% mutate(age=case_when(age>85 ~ 85, T ~ age))
+m1 <- readRDS(here("m1.rds"))
+wp_2019 <- readRDS(here("wp_2019.rds")) %>% ungroup() %>% mutate(p_pop=N_wp/sum(N_wp)) %>% mutate(clust=as.factor(paste0("c",clust)))
+
+
+age_levels2 <- c("16-19","20-24","25-29","30-34","35-39","40-44","45-49","50-54","55-59","60-64","65-69","70+") # includes up to 70
+age_levels_hack <- c(18,22,27,32,37,42,47,52,57,62,67,72)
+
+scale %>% tabyl(hiv)
+```
+
+```{r, eval=FALSE}
+# Priors
+p1 <- c(
+  prior(normal(-2.75,0.1), class=Intercept), # so this is my estimate for intercept at base case??? 
+  prior(normal(1,0.5), class="b"), #log-odds for women compared to men (see graph at top, log-odds 1 roughly equvilent to doubling)
+  prior(cauchy(0,0.5), sd) # can't remember/not sure what this is
+)
+
+# Model
+m1 <- brm(hiv ~ 1 +  ns(age, df=3)*sex + (1 + ns(age, df=3)*sex |clust), 
+          data=scale, 
+          family=bernoulli(), 
+          prior=p1,
+          chains=4,
+          cores=4)
+
+saveRDS(m1,here("m1.rds"))
+```
+
+
+
+# Explore this a bit
+
+### 1. Attempt to not add newdata
+
+Doesn't work
+
+```{r, error=T}
+# 1. Although the help function for tidybayes says if you exclude newdata, often you will get from model... this doesn't work here
+add_fitted_draws(model=m1)
+```
+
+### 2. Scaffold df
+
+Create a scaffold df - one row per every combo of age, sex, cluster (one age at midpoint of every age group for now)
+
+```{r}
+# Create a scaffold df - one row per every combo of age, sex, cluster (one age at midpoint of every age group for now)
+newdata_blank <- list(clust=paste0("c",c(1:72)), age=c(18,22,27,32,37,42,47,52,57,62,67,72), sex=c("male", "female")) %>% expand.grid() %>% as_tibble()
+
+a <- tidybayes::add_fitted_draws(newdata=newdata_blank, model=m1) 
+```
+
+So this makes sense for a summary of probability of being HIV positive at any age / sex / cluster category
+
+```{r}
+a %>% group_by(age,sex,clust) %>% median_qi(.value)
+```
+
+And we can use this to draw the graph we like (although NB. this graph is less good as age is one of 9 levels, not over every level)
+```{r}
+a %>% group_by(age,sex,clust) %>% median_qi(.value) %>%
+  ggplot() +
+  geom_path(aes(x=age, y=.value, group=clust, colour=sex), alpha=0.2) +
+  facet_grid(sex~.) +
+  scale_color_brewer(palette = "Set1") +
+  #scale_colour_manual(values = c("cyan4", "darkorange")) +
+  labs(y="HIV prevalence (%)",
+       x="Age (years)") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+BUT there are two problems with "overall" HIV prevalence here. (a) the CI is too wide, (b) I am pretty sure this is overall HIV prevalence (?probability) for a population where there is one person at every age-sex-cluster level.
+
+See below.  HIV prevalence 18% (too high, it's 13% in reality) and CI goes from 1.8% to 39%.  
+
+To me this CI makes sense if you had to guess probability of any one person picked at random in Blantyre being HIV positive, but it doesn't make sense as a population prevalence (because not everyone in population is going to have extreme values).
+
+```{r}
+a %>% ungroup() %>% median_qi(.value)
+```
+
+So, not claiming this is sensible, but it is possible to take the fitted_draws df and gather a summary of each "hypothetical" one-person-per-age-sex-category population. Then can median_qi the summary...
+
+
+```{r}
+a %>% ungroup() %>% mutate(set=rep(1:4000, times=nrow(newdata_blank))) %>% # the defaults in add_fitted_draws seem to have 4000 draws per age-sex-clust category
+  group_by(set) %>% 
+  summarise(prev=median(.value)) %>% # can take median here as there is one "person" (row) per age-sex-cluster category, so nothing to weight
+  median_qi(prev)
+```
+
+^^ Still 17.9 (which I think is wrong), but CI is much smaller (16.5 to 19.5)
+
+# 3. A scaffold from the data itself
+
+```{r, message=F}
+newdata_scale <- scale %>% 
+  mutate(age = cut(age, breaks=c(15,20,25,30,35,40,45,50,55,60,65,70,Inf), right=F,  labels=age_levels_hack)) %>%
+  mutate(age=as.numeric(as.character(age))) %>%
+  group_by(age,sex,clust) %>% summarise(n=n()) %>% 
+  right_join(newdata_blank) %>%
+  mutate(n=case_when(is.na(n)~0L, T ~n)) # to make NAs into zeros
+newdata_scale # so this is a dataframe with the number of people in each age-sex-cluster group ("n")
+
+b <- tidybayes::add_fitted_draws(newdata=newdata_scale, model=m1) 
+b %>% ungroup() %>% median_qi(.value) # same as above so far - just one person for each row (have ignored "n")
+```
+Now combine with how many people are in each age-sex-cluster category (there are 4000 draws per level, so 4000 different hypothetical populations)
+
+```{r}
+b %>% ungroup() %>% 
+  mutate(set=rep(1:4000, times=nrow(newdata_blank))) %>%
+  group_by(set) %>%
+  mutate(p_pop=n/sum(n)) %>% ###Every sum(n) is the same try to find out from Rachael
+  mutate(pp =.value * p_pop) %>%
+  summarise(prev=sum(pp)) # Sothis is the overall prevalence, in 4000 different iterations of draws
+
+b %>% ungroup() %>% 
+  mutate(set=rep(1:4000, times=nrow(newdata_blank))) %>%
+  group_by(set) %>%
+  mutate(p_pop=n/sum(n)) %>%
+  mutate(pp =.value * p_pop) %>%
+  summarise(prev=sum(pp)) %>% # Sothis is the overall prevalence, in 4000 different iterations of draws
+  median_qi(prev)
+```
+So this estimate ^ (13.7%) is very similar to data, with a v small CI (13.1 - 14.2%). 
+
+Could also do something similar to calculate cluster-specific prevalence; given the age and sex distribution in each cluster (in the tested dataset)
+
+```{r, message=F, warning=F}
+c <- b %>% ungroup() %>% 
+  mutate(set=rep(1:4000, times=nrow(newdata_blank))) %>%
+  group_by(set, clust) %>%
+  mutate(p_pop=n/sum(n)) %>%
+  mutate(pp =.value * p_pop) %>%
+  summarise(prev=sum(pp)) %>%
+  group_by(clust) %>%
+  median_qi(prev)
+c
+```
+
+And plot this - is there shrinkage?
+
+So there is shrinkage, yes!
+
+```{r}
+scale_clust <- scale %>% group_by(clust) %>% summarise(n_pos=sum(hiv=="pos"), n=n()) %>% mutate(p_pos=n_pos/n) %>% filter(is.na(clust)==F)
+scale_clust$clust <- reorder(scale_clust$clust, scale_clust$p_pos)
+
+ggplot() +
+  geom_point(aes(x=clust,y=p_pos,color="observed"), data=scale_clust) +
+  geom_pointrange(aes(x=clust, y=prev, ymin=.lower, ymax=.upper, color="modelled"), data=c, size=0.2) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=-90))
+```
+
+## 4. Scaffold from the census
+
+Same as the steps above, except this time, match to the census (wp) not the observed data.
+
+HIV prevalence goes down, still a v small CI.
+
+```{r}
+newdata_wp <- wp_2019 %>% mutate(age=as.character(ageg))%>% mutate(age=factor(age,labels=age_levels_hack)) %>% mutate(age=as.numeric(as.character(age))) %>% mutate(clust=as.character(clust)) %>% ungroup() %>% select(age,clust,sex,N_wp) %>% rename(n=N_wp)
+
+d <- tidybayes::add_fitted_draws(newdata=newdata_wp, model=m1) 
+
+d %>% ungroup() %>% 
+  mutate(set=rep(1:4000, times=nrow(newdata_wp))) %>%
+  group_by(set) %>%
+  mutate(p_pop=n/sum(n)) %>%
+  mutate(pp =.value * p_pop) %>%
+  summarise(prev=sum(pp)) # So this is the overall prevalence, in 4000 different iterations of draws
+
+d %>% ungroup() %>% 
+  mutate(set=rep(1:4000, times=nrow(newdata_wp))) %>%
+  group_by(set) %>%
+  mutate(p_pop=n/sum(n)) %>%
+  mutate(pp =.value * p_pop) %>%
+  summarise(prev=sum(pp)) %>% # So this is the overall prevalence, in 4000 different iterations of draws
+  median_qi(prev) # and median_qi it?
+
+```
+
+And what about per cluster with census data...?
+
+Goes down pretty much as expected
+
+```{r}
+e <- d %>% ungroup() %>% 
+  mutate(set=rep(1:4000, times=nrow(newdata_blank))) %>%
+  group_by(set, clust) %>%
+  mutate(p_pop=n/sum(n)) %>%
+  mutate(pp =.value * p_pop) %>%
+  summarise(prev=sum(pp)) %>%
+  group_by(clust) %>%
+  median_qi(prev)
+
+ggplot() +
+  geom_point(aes(x=clust,y=p_pos*100,color="observed"), data=scale_clust) +
+  geom_pointrange(aes(x=clust, y=prev*100, ymin=.lower*100, ymax=.upper*100, color="modelled"), data=c, size=0.2) +
+  geom_pointrange(aes(x=clust, y=prev*100, ymin=.lower*100, ymax=.upper*100, color="post-strat"), data=e, size=0.2) +
+  geom_hline(aes(color="observed", yintercept=median(scale_clust$p_pos)*100)) +
+    geom_hline(aes(color="modelled", yintercept=median(c$prev)*100)) +
+    geom_hline(aes(color="post-strat", yintercept=median(e$prev)*100)) +
+  scale_color_manual(values=c("#DD8D29","#46ACC8","#B40F20")) +
+  labs(y="HIV prevalence (%)",
+       x="Cluster") +
+  theme_bw() +
+  theme(axis.text.x = element_blank())
+```
+
+# 5. Poststratify "by hand" to check
+
+No modelling.  And ignoring cluster for now - just age and sex.
+
+```{r}
+f <- scale %>% 
+  mutate(age = cut(age, breaks=c(15,20,25,30,35,40,45,50,55,60,65,70,Inf), right=F,  labels=age_levels_hack)) %>%
+  mutate(age=as.numeric(as.character(age))) %>%
+  group_by(age,sex) %>% summarise(n_pos=sum(hiv=="pos"), n=n()) %>% 
+  ungroup() %>%
+  mutate(p_pos=n_pos/n,
+         p_pop_tested=n/sum(n))
+
+g <- newdata_wp %>% group_by(age,sex) %>% summarise(N_wp=sum(n)) %>% ungroup() %>% mutate(p_pop=N_wp/sum(N_wp)) %>% left_join(f)
+
+ggplot(g) +
+  geom_path(aes(x=age, y=p_pop_tested, group=sex, color="Tested")) +
+  geom_path(aes(x=age, y=p_pop, group=sex, color="WP population")) +
+  facet_grid(.~sex) +
+  theme_bw()
+```
+
+So yellow is undesampled -- and we've undersampled people with a relatively low risk of HIV.  And blue is oversampled, and we've oversampled people with a relatively higher HIV risk.
+
+```{r}
+g %>% select(age,sex,p_pos,p_pop,p_pop_tested) %>% 
+  mutate(diff=p_pop_tested - p_pop) %>%
+  gt() %>%
+  fmt_number(columns = c(p_pos, p_pop_tested, p_pop, diff),rows = everything(),decimals = 3) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "#8cd3ff")
+      ),
+    locations = cells_body(
+      columns = c(diff,age,sex,p_pos),
+      rows = diff > 0.025
+    )) %>%
+    tab_style(
+    style = list(
+      cell_fill(color = "#ffe5b4")
+      ),
+    locations = cells_body(
+      columns = c(diff,age,sex,p_pos),
+      rows = diff < -0.025
+    )) 
+```
+
+```{r}
+g %>% mutate(p1=p_pos * p_pop_tested) %>%
+  mutate(p2=p_pos * p_pop) %>%
+  summarise(sample=sum(p1),
+            post_strat=sum(p2)) # goes down when post-stratify "by hand".
+
+scale %>% tabyl(hiv)
+
+```
